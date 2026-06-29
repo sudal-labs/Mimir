@@ -1,0 +1,8 @@
+# Airflow 공식 이미지는 Python 3.12 기반 (3.14 미지원 — 운영 시 확인 필요)
+FROM apache/airflow:2.9.1
+
+USER airflow
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+COPY dags/ /opt/airflow/dags/
