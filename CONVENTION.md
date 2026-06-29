@@ -24,6 +24,6 @@
 - 다른 값들로부터 계산 가능한 파생값은 저장하지 않고, 서비스 레이어(Python)에서 계산
 
 ## 주석/네이밍
-- PEP 8 네이밍 (함수·변수: `camelCase`, 클래스: `PascalCase`, 상수: `UPPER_SNAKE_CASE`)
+- PEP 8 네이밍 (함수·변수: `snake_case`, 클래스: `PascalCase`, 상수: `UPPER_SNAKE_CASE`)
 - 가능한 모든 함수/메서드 시그니처에 타입힌트 작성
 - 공개 함수/클래스에는 책임을 한두 줄로 요약하는 docstring 작성
