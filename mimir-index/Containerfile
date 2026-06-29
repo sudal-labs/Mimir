@@ -1,0 +1,14 @@
+FROM python:3.14-slim AS base
+
+WORKDIR /app
+COPY requirements.txt .
+# sentence-transformers 의존성(torch)은 용량이 크므로 별도 레이어
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/ /app/src/
+COPY alembic.ini /app/alembic.ini
+COPY alembic/ /app/alembic/
+ENV PYTHONPATH=/app/src
+
+# DB 마이그레이션 후 Kafka 소비자 시작
+CMD ["sh", "-c", "alembic upgrade head && python -m mimir_index.main"]
