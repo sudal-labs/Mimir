@@ -1,0 +1,231 @@
+name: mimir
+
+# ────────────────────────────────────────────────────────────────
+# 공통 환경 변수 앵커
+# ────────────────────────────────────────────────────────────────
+x-postgres-env: &postgres-env
+  POSTGRES_USER: ${POSTGRES_USER:-mimir}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mimir}
+  POSTGRES_DB: ${POSTGRES_DB:-mimir}
+
+x-common-env: &common-env
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  OPENSEARCH_HOST: opensearch
+  OPENSEARCH_PORT: "9200"
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: ${POSTGRES_USER:-mimir}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mimir}
+  POSTGRES_DB: ${POSTGRES_DB:-mimir}
+  MONGO_HOST: mongo
+  MONGO_PORT: "27017"
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  XAI_API_KEY: ${XAI_API_KEY:-}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-paraphrase-multilingual-MiniLM-L12-v2}
+  EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
+
+services:
+
+  # ── 인프라 ──────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      <<: *postgres-env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mimir} -d ${POSTGRES_DB:-mimir}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-mimir}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-mimir}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  opensearch:
+    image: opensearchproject/opensearch:2.11.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -qv '\"status\":\"red\"'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  kafka:
+    image: bitnami/kafka:3.7
+    environment:
+      KAFKA_CFG_NODE_ID: "0"
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # 이벤트 버스 용도 — retention 짧게 설정 (3일)
+      KAFKA_CFG_LOG_RETENTION_HOURS: "72"
+    ports:
+      - "9094:9094"   # 호스트에서 접속 시 localhost:9094
+    volumes:
+      - kafka-data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  loki:
+    image: grafana/loki:2.9.0
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki-data:/loki
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - loki
+
+  # ── Airflow (mimir-scheduler) ────────────────────────────────────
+  # LocalExecutor 모드 — standalone으로 webserver + scheduler 동시 실행
+
+  airflow:
+    image: apache/airflow:2.9.1
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-mimir}:${POSTGRES_PASSWORD:-mimir}@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+      <<: *common-env
+    command: standalone
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./mimir-scheduler/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── 애플리케이션 ────────────────────────────────────────────────
+
+  ingest:
+    build:
+      context: ../mimir-ingest
+      dockerfile: Containerfile
+    image: mimir-ingest:latest
+    environment:
+      <<: *common-env
+      VAULT_PATH: /vault
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+    ports:
+      - "8001:8001"
+    volumes:
+      - type: bind
+        source: ${VAULT_PATH:-/tmp/vault}
+        target: /vault
+        read_only: true
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  index:
+    build:
+      context: ../mimir-index
+      dockerfile: Containerfile
+    image: mimir-index:latest
+    environment:
+      <<: *common-env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  link:
+    build:
+      context: ../mimir-link
+      dockerfile: Containerfile
+    image: mimir-link:latest
+    environment:
+      <<: *common-env
+      VAULT_PATH: /vault
+    volumes:
+      - type: bind
+        source: ${VAULT_PATH:-/tmp/vault}
+        target: /vault
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ../mimir-api
+      dockerfile: Containerfile
+    image: mimir-api:latest
+    environment:
+      <<: *common-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# ── 볼륨 ────────────────────────────────────────────────────────
+volumes:
+  postgres-data:
+  mongo-data:
+  opensearch-data:
+  kafka-data:
+  loki-data:
+  grafana-data:
+  airflow-logs:
