@@ -20,7 +20,7 @@ def build_database_url() -> str:
 
 
 class PostgresAdapter(MetadataStore):
-    """AsyncSession 기반 PostgreSQL 메타데이터 저장소."""
+    """AsyncSession 기반 PostgreSQL 메타데이터 저장소"""
 
     def __init__(self) -> None:
         engine = create_async_engine(build_database_url(), echo=False)
